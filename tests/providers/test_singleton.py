@@ -169,6 +169,34 @@ async def test_async_singleton_asyncio_concurrency() -> None:
     assert all(val is results[0] for val in results)
 
 
+async def test_async_singleton_initialized_once_under_concurrency() -> None:
+    calls = 0
+    factory_entered = asyncio.Event()
+    factory_release = asyncio.Event()
+
+    async def create_instance() -> object:
+        nonlocal calls
+        calls += 1
+        factory_entered.set()
+        await factory_release.wait()
+        return object()
+
+    singleton = providers.AsyncSingleton(create_instance)
+
+    first = asyncio.create_task(singleton.resolve())
+    # first resolver is guaranteed to be inside the factory, holding the lock
+    await factory_entered.wait()
+    second = asyncio.create_task(singleton.resolve())
+    # scheduling yield: lets the second resolver run up to the lock before the factory is released
+    await asyncio.sleep(0)
+    factory_release.set()
+
+    first_instance, second_instance = await asyncio.gather(first, second)
+
+    assert first_instance is second_instance
+    assert calls == 1
+
+
 async def test_async_singleton_sync_resolve_failure() -> None:
     with pytest.raises(RuntimeError, match=r"AsyncSingleton cannot be resolved in an sync context."):
         DIContainer.singleton_async.resolve_sync()

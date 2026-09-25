@@ -321,6 +321,68 @@ async def test_sync_context_resource_asyncio_concurrency() -> None:
     assert calls == 1
 
 
+async def test_concurrent_contexts_resolve_independent_instances() -> None:
+    created: list[object] = []
+    first_request_resolved = asyncio.Event()
+    second_request_resolved = asyncio.Event()
+
+    async def create_request_resource() -> typing.AsyncIterator[object]:
+        instance = object()
+        created.append(instance)
+        yield instance
+
+    resource = providers.ContextResource(create_request_resource)
+
+    async def first_request() -> object:
+        async with resource.context_async():
+            instance = await resource.resolve()
+            assert await resource.resolve() is instance
+            first_request_resolved.set()
+            # keep this request open until the second request has resolved its own instance
+            await second_request_resolved.wait()
+            return instance
+
+    async def second_request() -> object:
+        await first_request_resolved.wait()
+        async with resource.context_async():
+            instance = await resource.resolve()
+            second_request_resolved.set()
+            return instance
+
+    first_instance, second_instance = await asyncio.gather(first_request(), second_request())
+
+    assert first_instance is not second_instance
+    assert len(created) == 2
+
+
+async def test_async_generator_resource_cleaned_up_on_cancellation() -> None:
+    resource_started = asyncio.Event()
+    resource_cleaned_up = asyncio.Event()
+    never_completes = asyncio.Event()
+
+    async def create_request_resource() -> typing.AsyncIterator[str]:
+        try:
+            resource_started.set()
+            yield "resource"
+        finally:
+            resource_cleaned_up.set()
+
+    resource = providers.ContextResource(create_request_resource)
+
+    async def request() -> None:
+        async with resource.context_async():
+            await resource.resolve()
+            await never_completes.wait()
+
+    task = asyncio.create_task(request())
+    await resource_started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert resource_cleaned_up.is_set()
+
+
 async def test_async_injection_when_explicitly_resetting_resource_specific_context(
     async_context_resource: providers.ContextResource[str],
 ) -> None:
